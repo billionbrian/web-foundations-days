@@ -1,0 +1,46 @@
+Day 6 — School Database Design
+
+1. Tables
+
+
+students stores each student's unique ID, name, and email address. student_id is the primary key. name and email are required (NOT NULL), and email is UNIQUE so two students cannot register with the same email address.
+
+courses stores each course's unique ID, name, and course code. course_id is the primary key. The course name and code are required, and course_code is unique.
+
+enrolments records which student is enrolled on which course, together with an optional grade. enrolment_id is the primary key. student_id and course_id are foreign keys referencing students and courses. Both are NOT NULL because each enrolment must belong to a student and a course. UNIQUE (student_id, course_id) prevents the same student from enrolling on the same course twice.
+
+
+2. Relationships
+
+
+Students to enrolments — one-to-many: one student can have several enrolment records, but each enrolment record refers to one student.
+
+Courses to enrolments — one-to-many: one course can have several enrolment records, but each enrolment record refers to one course.
+
+Students to courses — many-to-many: a student can take several courses, and each course can have several students. The enrolments table is a join table (also called a junction or associative table) that resolves this many-to-many relationship into two one-to-many relationships. It also stores information about the relationship itself, such as the student's grade for a course.
+
+
+3. Index
+
+I would add an index on enrolments(course_id). This can make queries that find students enrolled on a particular course, and queries that count enrolments per course, more efficient as the database grows. The UNIQUE (student_id, course_id) constraint also creates a unique index in SQLite to help enforce the rule against duplicate enrolments.
+
+
+4. SQL or NoSQL?
+
+I would choose SQL, using SQLite for this school system. Students, courses, and enrolments have clearly defined relationships, and the requirements include primary keys, foreign keys, unique constraints, and accurate updates. A relational database helps maintain data integrity and supports joins and aggregate queries, such as counting students per course. NoSQL can be useful for flexible or frequently changing data structures, but that flexibility is less important for this structured system. If the application later needs many concurrent users or deployment across servers, it could migrate to a server-based relational database such as PostgreSQL.
+
+
+5. Running the SQL
+
+
+Open SQLiteOnline.
+
+Select SQLite as the database engine.
+
+Open school.sql, copy its contents into the SQL editor, and run the script.
+
+The script creates the tables, inserts sample records, creates an index, runs the four reporting queries, updates one enrolment's grade, and verifies the update.
+
+
+The script enables foreign-key enforcement with PRAGMA foreign_keys = ON; and uses SQLite-compatible syntax.
+
