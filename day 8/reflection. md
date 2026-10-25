@@ -1,0 +1,14 @@
+
+ Day 8: System Design Reflection
+
+ 1. The Most Difficult Concept and How I Overcame It
+
+The hardest concept for me was understanding how a system can handle many users doing the same thing at the same time without causing problems. At first, I thought adding more servers would solve most of the challenges. However, while working on TicketHub, I realized that even with many servers, two people could still end up trying to buy the same seat. This helped me understand why database transactions, locking, and unique constraints are important. I also learned that Redis is useful for making a system faster, but it should not be the final authority when deciding who gets a seat. Going through practical examples helped me understand these concepts better than just reading about them.
+
+ 2. What I Would Improve in My Capstone
+
+If I had more time, I would improve how TicketHub handles traffic when a popular concert goes on sale. Having 200,000 people trying to buy 20,000 seats within ten minutes is a serious challenge. I would test what happens when many requests arrive together, payments fail, or reservations expire before checkout is completed. I would also work on making the waiting room fair so that the system does not become overwhelmed. This would help me identify weaknesses in my design before it could be used in a real ticketing business.
+
+ 3. What I Will Learn Next
+
+Next, I want to learn how to implement these designs in actual applications. I am particularly interested in working with databases, Redis, APIs, and cloud deployment. I want to move from drawing architecture diagrams to building systems that can handle real users and unexpected problems.
