@@ -1,0 +1,454 @@
+
+# TicketHub: System Design Document
+
+## 1. Requirements
+
+### 1.1 Functional Requirements
+
+TicketHub is a website where users discover events, select seats, purchase tickets, and view their bookings.
+
+The system must allow users to:
+
+1. Register, log in, and manage their accounts.
+2. Browse upcoming concerts and events.
+3. View event details, venue information, ticket prices, and seat availability.
+4. Select seats and temporarily reserve them during checkout.
+5. Pay for reservations and receive booking confirmations.
+6. View their purchased tickets and booking history.
+7. Allow authorized event organizers to create and manage events.
+8. Release seats when reservations expire or payments fail.
+9. Prevent two users from purchasing the same seat for the same event.
+10. Notify customers when their purchases are confirmed.
+
+### 1.2 Non-Functional Requirements
+
+- **Scalability:** Handle 2 million registered users and significant traffic spikes during popular ticket sales.
+- **Availability:** Keep browsing and purchasing services available during peak demand.
+- **Consistency:** Guarantee that a seat cannot be sold to more than one customer.
+- **Performance:** Serve cached event information quickly and minimize unnecessary database queries.
+- **Security:** Protect user accounts, payment information, and personal data.
+- **Reliability:** Recover safely from server failures and payment interruptions.
+- **Maintainability:** Use clearly separated application components that can be upgraded independently.
+- **Observability:** Monitor response times, failed payments, reservation conflicts, and server health.
+
+## 2. Capacity Estimation
+
+The estimates below use the assignment's figures. Peak traffic multipliers are planning assumptions rather than measured traffic.
+
+### 2.1 Normal Daily Traffic
+
+Given:
+- Registered users: 2,000,000
+- Daily visitors: 50,000
+- Average pages viewed per visitor: 10
+- Tickets sold per day: 5,000
+
+**Page views per day**
+
+50,000 visitors × 10 pages = 500,000 page views per day.
+
+**Average page requests per second**
+
+500,000 ÷ 86,400 ≈ 5.8 page views per second.
+
+Assuming normal peak traffic is ten times the daily average:
+
+5.8 × 10 ≈ 58 page views per second.
+
+**Average ticket sales per second**
+
+5,000 ÷ 86,400 ≈ 0.058 tickets per second.
+
+This averages approximately 208 tickets per hour, although actual sales will be unevenly distributed.
+
+### 2.2 Popular Concert Sale
+
+Given:
+- People attempting to buy tickets: 200,000
+- Available seats: 20,000
+- Sale window: 10 minutes (600 seconds)
+
+**Average purchase attempts per second**
+
+200,000 ÷ 600 ≈ 333 attempts per second.
+
+**Maximum tickets available for sale**
+
+20,000 seats.
+
+**Maximum average successful sales rate if all seats sell within ten minutes**
+
+20,000 ÷ 600 ≈ 33.3 tickets per second.
+
+**Competition for seats**
+
+200,000 ÷ 20,000 = 10 people attempting to buy for every available seat, on average.
+
+These calculations represent purchase attempts, not guaranteed completed orders. Payment failures, retries, abandoned checkouts, and reservation expirations affect the final sales count.
+
+### 2.3 Capacity Planning Decisions
+
+- Run multiple stateless application servers behind a load balancer.
+- Use Redis to cache event listings and other frequently accessed read data.
+- Apply rate limits and virtual waiting rooms to manage intense sale traffic.
+- Keep seat allocation and ticket issuance under strict database consistency controls.
+- Size infrastructure for bursts above the calculated average and validate capacity through load testing.
+- Monitor database connection pools, reservation conflicts, payment latency, and queue depth.
+
+## 3. High-Level Architecture
+
+### 3.1 Architecture Diagram
+
+```text
+                 +----------------------+
+                 |   Web / Mobile UI    |
+                 +----------+-----------+
+                            |
+                            v
+                 +----------------------+
+                 | CDN / WAF / Rate     |
+                 | Limiting / Queue     |
+                 +----------+-----------+
+                            |
+                            v
+                 +----------------------+
+                 |    Load Balancer     |
+                 +----------+-----------+
+                            |
+              +-------------+-------------+
+              |             |             |
+              v             v             v
+        +-----------+ +-----------+ +-----------+
+        | App       | | App       | | App       |
+        | Server 1  | | Server 2  | | Server N  |
+        +-----+-----+ +-----+-----+ +-----+-----+
+              |             |             |
+              +-------------+-------------+
+                            |
+             +--------------+--------------+
+             |                             |
+             v                             v
+      +--------------+             +---------------+
+      | Redis Cache  |             | Relational DB |
+      | Event Reads  |             | Source of      |
+      | Rate Limits  |             | Seat Truth     |
+      +--------------+             +-------+-------+
+                                            |
+                                            v
+                                   +------------------+
+                                   | Reservation and  |
+                                   | Ticket Records   |
+                                   +------------------+
+
+          App Servers
+               |
+               v
+       +------------------+
+       | Message Queue    |
+       +--------+---------+
+                |
+                v
+       +------------------+
+       | Background Jobs  |
+       | Email / Tickets  |
+       +------------------+
+
+       App Server ---> Payment Provider
+```
+
+### 3.2 Component Explanations
+
+**1. Web or Mobile UI**
+
+Provides the interface for browsing events, selecting seats, checking out, and viewing tickets.
+
+**2. CDN and Web Application Firewall (WAF)**
+
+The CDN serves static assets close to users. The WAF filters malicious traffic. Rate limiting and a virtual waiting room help control demand during popular ticket sales.
+
+**3. Load Balancer**
+
+Distributes incoming requests across healthy application servers. It supports horizontal scaling and prevents one application server from receiving all requests.
+
+**4. Application Servers**
+
+Handle authentication, event browsing, reservations, checkout, payment coordination, and ticket access. Servers remain stateless so any healthy server can handle a user's request.
+
+**5. Redis Cache**
+
+Stores frequently accessed event details and other suitable read data. It can also support rate limiting and temporary coordination. Redis is not the ultimate authority for whether a seat has been sold.
+
+**6. Relational Database**
+
+Stores users, events, seats, reservations, orders, and tickets. Database transactions, row-level locking or conditional updates, and unique constraints enforce correct seat allocation.
+
+**7. Reservation and Ticket Records**
+
+Represent temporary seat holds and confirmed purchases. A reservation expires if checkout is not completed within its allowed time. Confirmed tickets are issued only after successful payment verification.
+
+**8. Message Queue and Background Workers**
+
+Process non-critical tasks such as sending email confirmations and generating ticket files. This prevents notification delays from blocking the main checkout request.
+
+**9. Payment Provider**
+
+Processes payments through a trusted payment gateway. TicketHub verifies payment status through authenticated callbacks or provider-side verification before confirming an order.
+
+### 3.3 Request Flow
+
+For event browsing, the application checks Redis first and queries the database on a cache miss.
+
+For seat purchasing, the application validates the request and attempts to reserve the selected seat in the relational database. The user then completes payment. Once payment is verified, the order and ticket records are finalized. Notifications are dispatched asynchronously.
+
+## 4. API Design
+
+The API uses REST conventions and JSON request and response bodies. Authenticated endpoints require a valid session or access token.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/api/v1/auth/register` | Register a user |
+| POST | `/api/v1/auth/login` | Authenticate a user |
+| GET | `/api/v1/events` | List and search events |
+| GET | `/api/v1/events/:eventId` | Retrieve event details |
+| GET | `/api/v1/events/:eventId/seats` | Retrieve seat availability |
+| POST | `/api/v1/reservations` | Temporarily reserve seats |
+| GET | `/api/v1/reservations/:reservationId` | Retrieve reservation status |
+| DELETE | `/api/v1/reservations/:reservationId` | Cancel an active reservation |
+| POST | `/api/v1/orders` | Create an order from a valid reservation |
+| POST | `/api/v1/orders/:orderId/payment` | Initiate payment |
+| POST | `/api/v1/payments/webhook` | Receive and verify payment notifications |
+| GET | `/api/v1/orders/:orderId` | Retrieve order status |
+| GET | `/api/v1/users/me/tickets` | List the current user's tickets |
+
+### 4.1 Example: Reserve Seats
+
+Request:
+
+```http
+POST /api/v1/reservations
+Authorization: Bearer <access-token>
+Idempotency-Key: 8c2f-example
+Content-Type: application/json
+```
+
+```json
+{
+  "eventId": "event-123",
+  "seatIds": ["seat-A12"],
+  "holdDurationSeconds": 300
+}
+```
+
+The server must enforce the maximum permitted hold duration rather than blindly trusting the client.
+
+Successful response:
+
+```json
+{
+  "reservationId": "reservation-456",
+  "status": "HELD",
+  "expiresAt": "2026-10-24T18:05:00Z",
+  "seatIds": ["seat-A12"]
+}
+```
+
+If the seat has already been sold or held by another customer, the API returns a conflict response, typically HTTP `409 Conflict`.
+
+### 4.2 API Reliability Rules
+
+- Use authentication and authorization for protected operations.
+- Use idempotency keys for reservation, order, and payment-creation requests to prevent duplicate effects when clients retry.
+- Verify payment callbacks and reject invalid or duplicate payment events.
+- Return appropriate HTTP status codes, including `400`, `401`, `404`, `409`, and `429`.
+- Do not trust client-side seat availability as proof that a seat remains available.
+
+## 5. Data Model and Relationships
+
+A relational database such as PostgreSQL is suitable because ticket sales require strong consistency and transactional updates.
+
+### 5.1 Tables
+
+#### Users
+
+| Column | Description |
+|---|---|
+| `user_id` | Primary key |
+| `name` | Customer name |
+| `email` | Unique email address |
+| `password_hash` | Securely hashed password |
+| `created_at` | Account creation timestamp |
+
+#### Events
+
+| Column | Description |
+|---|---|
+| `event_id` | Primary key |
+| `organizer_id` | Foreign key referencing Users |
+| `name` | Event name |
+| `venue` | Event location |
+| `starts_at` | Event start time |
+| `status` | Draft, published, or cancelled |
+
+#### Seats
+
+| Column | Description |
+|---|---|
+| `seat_id` | Primary key |
+| `event_id` | Foreign key referencing Events |
+| `seat_label` | Seat identifier, such as A12 |
+| `price` | Ticket price |
+| `status` | Available, held, or sold |
+
+Constraint: `UNIQUE(event_id, seat_label)`.
+
+Each event has its own seat inventory. The same seat label may exist at different events.
+
+#### Reservations
+
+| Column | Description |
+|---|---|
+| `reservation_id` | Primary key |
+| `user_id` | Foreign key referencing Users |
+| `event_id` | Foreign key referencing Events |
+| `status` | Held, confirmed, expired, or cancelled |
+| `expires_at` | Reservation expiration timestamp |
+| `created_at` | Reservation creation timestamp |
+
+#### Reservation_Seats
+
+| Column | Description |
+|---|---|
+| `reservation_id` | Foreign key referencing Reservations |
+| `seat_id` | Foreign key referencing Seats |
+| `price_at_booking` | Price agreed at reservation time |
+
+Primary key: `(reservation_id, seat_id)`.
+
+The database must additionally enforce that a seat cannot belong to two simultaneous active reservations.
+
+#### Orders
+
+| Column | Description |
+|---|---|
+| `order_id` | Primary key |
+| `user_id` | Foreign key referencing Users |
+| `reservation_id` | Foreign key referencing Reservations |
+| `total_amount` | Order total |
+| `status` | Pending, paid, failed, or cancelled |
+| `idempotency_key` | Unique request identifier |
+| `created_at` | Order creation timestamp |
+
+A unique constraint on `reservation_id` prevents multiple orders from being created for the same reservation, where the business rules permit only one order per reservation.
+
+#### Payments
+
+| Column | Description |
+|---|---|
+| `payment_id` | Primary key |
+| `order_id` | Foreign key referencing Orders |
+| `provider_reference` | Payment provider's transaction reference |
+| `amount` | Amount charged |
+| `status` | Pending, succeeded, or failed |
+| `created_at` | Payment record creation timestamp |
+
+The provider transaction reference should be unique when present to prevent duplicate processing.
+
+#### Tickets
+
+| Column | Description |
+|---|---|
+| `ticket_id` | Primary key |
+| `order_id` | Foreign key referencing Orders |
+| `seat_id` | Foreign key referencing Seats |
+| `ticket_code` | Unique ticket identifier |
+| `status` | Valid, cancelled, or refunded |
+
+Critical constraint: `UNIQUE(seat_id)` in the ticket inventory model, where each seat record represents one event-specific seat. This guarantees that a seat cannot have multiple ticket records.
+
+### 5.2 Relationships
+
+- One user can organize many events.
+- One event has many seats.
+- One user can create many reservations.
+- One reservation can contain multiple seats.
+- One reservation produces at most one order under the selected order model.
+- One order can have multiple payment attempts, but only one successful payment should be accepted for the order.
+- One paid order can issue multiple tickets.
+- Each event-specific seat can have at most one valid issued ticket.
+
+Foreign keys preserve referential integrity. Unique constraints protect critical identifiers from duplication.
+
+### 5.3 Preventing Two People from Buying the Same Seat
+
+This is a core correctness requirement, not just a user-interface feature.
+
+**The relational database is the source of truth for seat ownership.** TicketHub must not rely on a browser display, Redis cache, or application-server memory to determine whether a seat has been claimed.
+
+The reservation workflow is:
+
+1. The customer selects a seat and submits a reservation request.
+2. The server starts a database transaction.
+3. It locks the relevant seat row, or performs an atomic conditional update that succeeds only if the seat is available.
+4. It verifies that the seat is neither sold nor covered by an unexpired reservation.
+5. It records the reservation and seat hold, then commits the transaction.
+6. If another customer requests the same seat concurrently, that request must wait, retry, or receive `409 Conflict` after the first transaction wins.
+7. During checkout, the system verifies that the reservation is still valid before processing the purchase.
+8. After the payment provider confirms payment, the system atomically confirms the order, marks the seat sold, and creates the ticket record.
+9. If payment fails or the hold expires, the reservation is released safely, provided no purchase has already been finalized.
+
+The system should enforce these rules with transactional updates and database constraints. A partial unique index or equivalent constraint can prevent overlapping active holds for a seat, while a unique ticket constraint prevents duplicate issuance.
+
+Payment callbacks must be idempotent. If a payment succeeds after a reservation has expired, the system must reconcile the payment safely rather than selling an already allocated seat.
+
+**Important:** Do not keep a database transaction open while waiting for an external payment provider. Create a time-limited hold, commit it, process payment separately, and finalize the purchase in a short transaction after verified payment.
+
+## 6. Trade-Offs and Design Decisions
+
+### 6.1 Strong Consistency vs. High Throughput
+
+**Decision:** Use a relational database transaction and constraints for seat allocation.
+
+- Advantage: Prevents duplicate seat allocation and maintains correct ownership.
+- Disadvantage: Competing requests for the same seat can block each other, increasing latency during popular sales.
+
+This trade-off is appropriate because selling the same seat twice is worse than rejecting or delaying a conflicting request.
+
+### 6.2 Redis Caching vs. Data Freshness
+
+**Decision:** Cache event descriptions, venue details, and other read-heavy data, but verify availability against the authoritative database.
+
+- Advantage: Reduces database load and speeds up event browsing.
+- Disadvantage: Cached data can become stale, especially during a ticket sale.
+
+Ticket availability shown to users is advisory. The database must validate the seat at reservation time.
+
+### 6.3 Waiting Room vs. Immediate Access
+
+**Decision:** Introduce a virtual waiting room for highly popular events.
+
+- Advantage: Smooths traffic spikes and protects application and database resources.
+- Disadvantage: Customers may wait before accessing the checkout flow, and queue management introduces additional complexity.
+
+The waiting room should control admission fairly and limit the rate of requests reaching the purchasing services.
+
+### 6.4 Synchronous vs. Asynchronous Processing
+
+**Decision:** Process seat reservation and order finalization synchronously, but send notifications through background workers.
+
+- Advantage: Checkout does not need to wait for email delivery.
+- Disadvantage: Customers may receive notifications slightly later, and the message queue needs retry and monitoring mechanisms.
+
+### 6.5 Fixed Infrastructure vs. Horizontal Scaling
+
+**Decision:** Use multiple stateless application servers and scale them based on demand.
+
+- Advantage: Improves resilience and supports increased traffic.
+- Disadvantage: Adds deployment, monitoring, and infrastructure costs. Scaling application servers alone will not fix a database bottleneck.
+
+## Conclusion
+
+TicketHub is designed to support 2 million registered users, normal daily browsing traffic, and a surge of 200,000 prospective buyers for 20,000 concert seats.
+
+The central design principle is to separate scalable browsing from strongly consistent purchasing. Caching and horizontal scaling improve performance, while database transactions, conditional seat allocation, unique constraints, idempotent payment handling, and time-limited reservations protect the integrity of ticket sales.
+
+Before production deployment, the design should be validated through load testing, payment-failure simulations, concurrency tests, and database recovery exercises.
